@@ -1,0 +1,173 @@
+diff --git "a/D:\\python\\pyinstxtractor_orig.py" "b/D:\\python\\pyinstxtractor.py"
+index 1ae3862..98c94db 100644
+--- "a/D:\\python\\pyinstxtractor_orig.py"
++++ "b/D:\\python\\pyinstxtractor.py"
+@@ -85,6 +85,7 @@ import zlib
+ import sys
+ import imp
+ import types
++import pefile
+ from uuid import uuid4 as uniquename
+ 
+ 
+@@ -101,7 +102,7 @@ class CTOCEntry:
+ class PyInstArchive:
+     PYINST20_COOKIE_SIZE = 24           # For pyinstaller 2.0
+     PYINST21_COOKIE_SIZE = 24 + 64      # For pyinstaller 2.1+
+-    MAGIC = b'MEI\014\013\012\013\016'  # Magic number which identifies pyinstaller
++    MAGIC =  b'MEI\x0c\x0b\n\x0b\x0e'  #b'MEI\014\013\012\013\016'  # Magic number which identifies pyinstaller
+ 
+     def __init__(self, path):
+         self.filePath = path
+@@ -126,44 +127,55 @@ class PyInstArchive:
+ 
+     def checkFile(self):
+         print('[*] Processing {0}'.format(self.filePath))
+-        # Check if it is a 2.0 archive
+-        self.fPtr.seek(self.fileSize - self.PYINST20_COOKIE_SIZE, os.SEEK_SET)
+-        magicFromFile = self.fPtr.read(len(self.MAGIC))
++        # Magic-oriented search
++        self.fPtr.seek(0, os.SEEK_SET)
++        memory = self.fPtr.read()
++        # there must be exactly two magic numbers
++        magic_count = memory.count(self.MAGIC)
++        if magic_count == 0:
++            print(">_<\" Modificated magic number")
++            return False
++        elif magic_count == 2:
++            print("[*] Okay, two magic numbers, all right")
++            self.magic_position = memory.rfind(self.MAGIC)
++        else:
++            print(">_<\" Modificated magic number v2")
++            return False
+ 
+-        if magicFromFile == self.MAGIC:
++        # Check if it is a 2.0 or 2.1+
++        zeroes = memory[self.magic_position+36:]
++        if not(
++                len(zeroes)>0 and
++                zeroes[:52] == b"\x00"*52
++        ):
+             self.pyinstVer = 20     # pyinstaller 2.0
+             print('[*] Pyinstaller version: 2.0')
+             return True
+ 
+-        # Check for pyinstaller 2.1+ before bailing out
+-        self.fPtr.seek(self.fileSize - self.PYINST21_COOKIE_SIZE, os.SEEK_SET)
+-        magicFromFile = self.fPtr.read(len(self.MAGIC))
+-
+-        if magicFromFile == self.MAGIC:
++        else:
+             print('[*] Pyinstaller version: 2.1+')
+             self.pyinstVer = 21     # pyinstaller 2.1+
+             return True
+ 
+-        print('[*] Error : Unsupported pyinstaller version or not a pyinstaller archive')
+-        return False
+-
+-
+     def getCArchiveInfo(self):
+         try:
+             if self.pyinstVer == 20:
+-                self.fPtr.seek(self.fileSize - self.PYINST20_COOKIE_SIZE, os.SEEK_SET)
++                self.fPtr.seek(self.magic_position, os.SEEK_SET)
+ 
+                 # Read CArchive cookie
+                 (magic, lengthofPackage, toc, tocLen, self.pyver) = \
+                 struct.unpack('!8siiii', self.fPtr.read(self.PYINST20_COOKIE_SIZE))
+ 
+             elif self.pyinstVer == 21:
+-                self.fPtr.seek(self.fileSize - self.PYINST21_COOKIE_SIZE, os.SEEK_SET)
++                self.fPtr.seek(self.magic_position, os.SEEK_SET)
+ 
+                 # Read CArchive cookie
+                 (magic, lengthofPackage, toc, tocLen, self.pyver, pylibname) = \
+                 struct.unpack('!8siiii64s', self.fPtr.read(self.PYINST21_COOKIE_SIZE))
+ 
++            else:
++                print("[*] Unreachable") # for IDE warning disable purposes
++                return False
+         except:
+             print('[*] Error : The file is not a pyinstaller archive')
+             return False
+@@ -172,7 +184,8 @@ class PyInstArchive:
+ 
+         # Overlay is the data appended at the end of the PE
+         self.overlaySize = lengthofPackage
+-        self.overlayPos = self.fileSize - self.overlaySize
++        pe = pefile.PE(self.filePath)
++        self.overlayPos = pe.get_overlay_data_start_offset()
+         self.tableOfContentsPos = self.overlayPos + toc
+         self.tableOfContentsSize = tocLen
+ 
+@@ -201,7 +214,7 @@ class PyInstArchive:
+             if len(name) == 0:
+                 name = str(uniquename())
+                 print('[!] Warning: Found an unamed file in CArchive. Using random name {0}'.format(name))
+-
++            #print("    ^_^ Found filename in CArchive:", name)
+             self.tocList.append( \
+                                 CTOCEntry(                      \
+                                     self.overlayPos + entryPos, \
+@@ -246,7 +259,7 @@ class PyInstArchive:
+                 f.write(data)
+ 
+             if entry.typeCmprsData == b's':
+-            	print('[+] Possible entry point: {0}'.format(entry.name))
++                print('[+] Possible entry point: {0}'.format(entry.name))
+ 
+             elif entry.typeCmprsData == b'z' or entry.typeCmprsData == b'Z':
+                 self._extractPyz(entry.name)
+@@ -309,6 +322,7 @@ class PyInstArchive:
+                     continue
+ 
+                 with open(destName + '.pyc', 'wb') as pycFile:
++                    #print("    ^_^ Found pyc in PYZ:", fileName)
+                     pycFile.write(pycHeader)      # Write pyc magic
+                     pycFile.write(b'\0' * 4)      # Write timestamp
+                     if self.pyver >= 33:
+@@ -316,25 +330,23 @@ class PyInstArchive:
+                     pycFile.write(data)
+ 
+ 
+-def main():
+-    if len(sys.argv) < 2:
+-        print('[*] Usage: pyinstxtractor.py <filename>')
+-
+-    else:
+-        arch = PyInstArchive(sys.argv[1])
+-        if arch.open():
+-            if arch.checkFile():
+-                if arch.getCArchiveInfo():
+-                    arch.parseTOC()
+-                    arch.extractFiles()
+-                    arch.close()
+-                    print('[*] Successfully extracted pyinstaller archive: {0}'.format(sys.argv[1]))
+-                    print('')
+-                    print('You can now use a python decompiler on the pyc files within the extracted directory')
+-                    return
+-
+-            arch.close()
++def main(filepath):
++    arch = PyInstArchive(filepath)
++    if arch.open():
++        if arch.checkFile():
++            if arch.getCArchiveInfo():
++                arch.parseTOC()
++                arch.extractFiles()
++                arch.close()
++                print('[*] Successfully extracted pyinstaller archive: {0}'.format(filepath))
++                print('')
++                print('You can now use a python decompiler on the pyc files within the extracted directory')
++                return
++        arch.close()
+ 
+ 
+ if __name__ == '__main__':
+-    main()
+\ No newline at end of file
++    if len(sys.argv) < 2:
++        print('[*] Usage: pyinstxtractor.py <filename>')
++    else:
++        main(sys.argv[1])
+\ No newline at end of file
